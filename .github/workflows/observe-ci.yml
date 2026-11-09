@@ -1,0 +1,36 @@
+name: CI report
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read        # the observed run's jobs, steps and artifacts
+      checks: read         # check runs for the required gate
+      contents: read       # the observed workflow file, for its needs graph
+      pull-requests: read  # resolve the run's PR; no comment is posted
+    steps:
+      - uses: gigaverse-app/ci-esta/actions/ci-observability@5ac779d9f2f1412f102c5830ab2a748711b5baab # v1.9.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          run-attempt: ${{ github.event.workflow_run.run_attempt }}
+          commit-sha: ${{ github.event.workflow_run.head_sha }}
+          required-gates-json: '[{"kind":"actions_job","job_name":"Validation gate"}]'
+          analyze-critical-path: 'true'
+          post-sticky: 'false'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ci-report-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: |
+            ci-observability.json
+            ci-observability.md
+            ci-observability.prom
+          if-no-files-found: error
