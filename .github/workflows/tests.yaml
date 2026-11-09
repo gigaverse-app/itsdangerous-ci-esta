@@ -122,3 +122,5 @@ jobs:
       - uses: gigaverse-app/ci-esta/actions/validation-gate@5ac779d9f2f1412f102c5830ab2a748711b5baab # v1.9.1
         with:
           needs: ${{ toJSON(needs) }}
+          # No test selection: every prerequisite must succeed.
+          required: '{"plan": true, "tests-linux": true, "tests": true, "typing": true}'
