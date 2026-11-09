@@ -5,20 +5,84 @@ on:
   push:
     branches: [main, stable]
     paths-ignore: ['docs/**', 'README.md']
+  workflow_dispatch:
+    inputs:
+      entries-per-runner:
+        description: Linux CPython versions on each runner. 1 reproduces one job per version.
+        type: choice
+        options: ['1', '2', '4']
+        default: '2'
+env:
+  # Linux CPython tox environments, packed onto shared runners by the plan job.
+  LINUX_PYTHON_VERSIONS: '["3.13", "3.12", "3.11", "3.10"]'
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      pools: ${{ steps.matrix.outputs.pools }}
+    steps:
+      - id: count
+        run: echo "count=$(jq length <<< "$LINUX_PYTHON_VERSIONS")" >> "$GITHUB_OUTPUT"
+      - uses: gigaverse-app/ci-esta/actions/plan-runner-pools@5ac779d9f2f1412f102c5830ab2a748711b5baab # v1.9.1
+        id: pools
+        with:
+          shards: ${{ steps.count.outputs.count }}
+          shards-per-runner: ${{ inputs.entries-per-runner || '2' }}
+      - id: matrix
+        env:
+          POOLS: ${{ steps.pools.outputs.pools }}
+        run: >
+          echo "pools=$(jq -c --argjson v "$LINUX_PYTHON_VERSIONS"
+          'map(. + {versions: $v[.first_shard - 1:.last_shard]})' <<< "$POOLS")"
+          >> "$GITHUB_OUTPUT"
+  tests-linux:
+    name: ${{ join(matrix.pool.versions, ', ') }}
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pool: ${{ fromJSON(needs.plan.outputs.pools) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: versions
+        env:
+          VERSIONS: ${{ toJSON(matrix.pool.versions) }}
+        run: |
+          {
+            echo 'list<<EOF'
+            jq -r '.[]' <<< "$VERSIONS"
+            echo 'EOF'
+            echo "envs=$(jq -r 'map("py" + .) | join(",")' <<< "$VERSIONS")"
+          } >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@f0ec1fc3b38f5e7cd731bb6ce540c5af426746bb # v6.1.0
+        with:
+          enable-cache: true
+          prune-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ steps.versions.outputs.list }}
+      - env:
+          POOL: ${{ matrix.pool.id }}
+          ENVS: ${{ steps.versions.outputs.envs }}
+        run: >
+          uv run --locked tox run-parallel --parallel auto --parallel-no-spinner
+          --result-json "tox-results-$POOL.json" -e "$ENVS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: tox-results-${{ matrix.pool.id }}
+          path: tox-results-*.json
+          if-no-files-found: error
   tests:
-    name: ${{ matrix.name || matrix.python }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {python: '3.13'}
           - {name: Windows, python: '3.13', os: windows-latest}
           - {name: Mac, python: '3.13', os: macos-latest}
-          - {python: '3.12'}
-          - {python: '3.11'}
-          - {python: '3.10'}
           - {name: PyPy, python: 'pypy-3.11', tox: pypy311}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -47,3 +111,12 @@ jobs:
           path: ./.mypy_cache
           key: mypy|${{ hashFiles('pyproject.toml') }}
       - run: uv run --locked tox run -e typing
+  validation-gate:
+    name: Validation gate
+    needs: [plan, tests-linux, tests, typing]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: gigaverse-app/ci-esta/actions/validation-gate@5ac779d9f2f1412f102c5830ab2a748711b5baab # v1.9.1
+        with:
+          needs: ${{ toJSON(needs) }}
